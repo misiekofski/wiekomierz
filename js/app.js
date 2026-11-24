@@ -4,16 +4,38 @@ const YEARS = Array.from({ length: Y1 - Y0 + 1 }, (_, i) => Y0 + i);
 const MIN_Q = 15, MAX_Q = 30;
 
 // a–b: years the thing existed; mn–mx: ages at which people used it; d: share of users "daily";
-// k: years of exposure for ~63% chance of use; cap: max share who used it; f: fame among people too young to have lived through it.
+// k: years of exposure for ~63% chance of use; cap: max share who used it; f: fame among people too young to have lived through it;
+// sx: how common it was among women (f) and men (m), as a multiplier on cap.
 
-function lik(it, Y) {
-  const s = Math.max(it.a, Y + it.mn), e = Math.min(it.b, Y + it.mx);
-  const o = Math.max(0, e - s + 1);
-  const u = (it.cap ?? 1) * (1 - Math.exp(-o / (it.k ?? 1.5)));
-  const h = Y + 8 <= it.b + 2 ? .92 : it.f; // lived through it as a kid or older → almost surely heard of it
-  return [u * it.d, u * (1 - it.d), (1 - u) * h, (1 - u) * (1 - h)].map(p => .86 * p + .035);
+// Years of exposure. Age limits are soft: younger siblings and late adopters fade in over a few years instead of a hard cut.
+function exposure(it, Y) {
+  let o = 0;
+  for (let t = it.a; t <= it.b; t++) {
+    const age = t - Y;
+    o += age < it.mn ? Math.max(0, 1 - (it.mn - age) / 3) : age > it.mx ? Math.max(0, 1 - (age - it.mx) / 2) : 1;
+  }
+  return o;
 }
-const L = ITEMS.map(it => YEARS.map(Y => lik(it, Y)));
+function sexFactor(it, sex) {
+  if (!it.sx) return 1;
+  return sex ? it.sx[sex] : (it.sx.f + it.sx.m) / 2;
+}
+function lik(it, Y, sex) {
+  const u = (it.cap ?? 1) * sexFactor(it, sex) * (1 - Math.exp(-exposure(it, Y) / (it.k ?? 1.5)));
+  // Lived through it, or grew up while parents and older siblings still talked about it → almost surely heard of it.
+  const h = Y + 8 <= it.b + 5 ? .92 : it.f;
+  return [u * it.d, u * (1 - it.d), (1 - u) * h, (1 - u) * (1 - h)].map(p => .8 * p + .05); // leave room for people who answer against the trend
+}
+let L;
+function buildL(sex) { L = ITEMS.map(it => YEARS.map(Y => lik(it, Y, sex))); }
+buildL(null);
+
+// Labels are written in the masculine form; switch the past tense ending for the chosen form.
+function say(text) {
+  if (S.sex === "f") return text.replace(/łem\b/g, "łam");
+  if (S.sex === null) return text.replace(/łem\b/g, "łem/am");
+  return text;
+}
 
 function prior() {
   const p = YEARS.map(Y => {
@@ -59,7 +81,8 @@ function shouldStop(n, post) {
 
 // ---------- rendering ----------
 const app = document.getElementById("app");
-let S = { phase: "intro", answers: [], current: null };
+const fresh = () => ({ phase: "intro", answers: [], current: null, sex: null });
+let S = fresh();
 
 function chartSVG(post) {
   const lo = quantile(post, .1), hi = quantile(post, .9);
@@ -88,10 +111,20 @@ function render() {
         <div class="keys" aria-hidden="true">
           ${LABELS.play.map((t, r) => `<div class="key ${COLORS[r]}" style="cursor:default"><span class="sw">${r + 1}</span>${t}</div>`).join("")}
         </div>
-        <p class="small">Klawisze 1–4 też działają. Kolejne pytanie dobieram tak, żeby jak najlepiej zawęzić rocznik, więc każda gra wygląda trochę inaczej.</p>
-        <div class="row"><button class="btn" id="start">Start ▸</button></div>
+        <p class="small">Klawisze 1–4 też działają. Kolejne pytanie dobieram tak, żeby jak najlepiej zawęzić rocznik, więc każda gra wygląda trochę inaczej. Płeć pomaga mi dobrać pytania i odpowiednio czytać odpowiedzi, bo dziewczyny i chłopaki w tych samych latach bawili się czym innym.</p>
+        <div class="row">
+          <button class="btn" id="start-f" data-sex="f">Start: kobieta ▸</button>
+          <button class="btn" id="start-m" data-sex="m">Start: mężczyzna ▸</button>
+          <button class="btn ghost" id="start-x" data-sex="">Wolę nie podawać</button>
+        </div>
       </div>`;
-    document.getElementById("start").onclick = () => { S.phase = "quiz"; S.current = nextItem(S.answers, post); render(); };
+    app.querySelectorAll("[data-sex]").forEach(b => b.onclick = () => {
+      S.sex = b.dataset.sex || null;
+      buildL(S.sex);
+      S.phase = "quiz";
+      S.current = nextItem(S.answers, posterior(S.answers));
+      render();
+    });
     return;
   }
   if (S.phase === "quiz") {
@@ -104,7 +137,7 @@ function render() {
         <div class="bar" aria-hidden="true"><i style="width:${(n / MAX_Q) * 100}%"></i></div>
         <p class="q">${it.q}</p>
         <div class="keys">
-          ${labels(it).map((t, r) => `<button class="key ${COLORS[r]}" id="ans${r}" data-r="${r}"><span class="sw">${r + 1}</span>${t}</button>`).join("")}
+          ${labels(it).map((t, r) => `<button class="key ${COLORS[r]}" id="ans${r}" data-r="${r}"><span class="sw">${r + 1}</span>${say(t)}</button>`).join("")}
         </div>
         <div class="signal">
           <div class="lbl"><span>Sygnał: rocznik</span><span>${n >= 5 ? `Na razie myślę: <b>${lo}–${hi}</b>` : "Zbieram dane…"}</span></div>
@@ -149,11 +182,11 @@ function render() {
       </div>
       <h2>Co Cię zdradziło</h2>
       <ul class="tells">
-        ${tells.map(t => `<li><span>${ITEMS[t.i].q}</span><span class="a" style="color:var(--${["red", "green", "yellow", "cyan"][t.r]})">${labels(ITEMS[t.i])[t.r]}</span></li>`).join("")}
+        ${tells.map(t => `<li><span>${ITEMS[t.i].q}</span><span class="a" style="color:var(--${["red", "green", "yellow", "cyan"][t.r]})">${say(labels(ITEMS[t.i])[t.r])}</span></li>`).join("")}
       </ul>
       <div class="row"><button class="btn" id="again">Jeszcze raz ▸</button></div>
     </div>`;
-  document.getElementById("again").onclick = () => { S = { phase: "intro", answers: [], current: null }; render(); };
+  document.getElementById("again").onclick = () => { S = fresh(); render(); };
 }
 
 function answer(r) {
